@@ -1,0 +1,19 @@
+# VS build intermediate files
+*.obj
+*.ipdb
+*.iobj
+*.pdb
+*.lib
+*.exp
+*.recipe
+*.tlog/
+*.FileListAbsolute.txt
+*.lastbuildstate
+
+# Temp files
+*.tmp
+*.log
+~$*
+
+# Claude Code
+.claude/
