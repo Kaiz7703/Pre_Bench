@@ -131,7 +131,8 @@ BOOL ExtractFileFromNtfs(HANDLE hVolume, NTFS_CONTEXT* ntfs,
                 // Resident data — copy directly
                 ATTR_RESIDENT* resAttr = (ATTR_RESIDENT*)attrPtr;
                 hive->size = resAttr->valueLength;
-                hive->data = (PBYTE)malloc(hive->size);
+                hive->data = (PBYTE)VirtualAlloc(NULL, max(hive->size, 1),
+                    MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
                 if (hive->data) {
                     memcpy(hive->data,
                         (PBYTE)attrPtr + resAttr->valueOffset,
@@ -146,7 +147,9 @@ BOOL ExtractFileFromNtfs(HANDLE hVolume, NTFS_CONTEXT* ntfs,
                 // Read DataRuns
                 PBYTE drPtr = (PBYTE)attrPtr + nonRes->dataRunOffset;
 
-                hive->data = (PBYTE)malloc(hive->size);
+                // VirtualAlloc for sector-aligned buffer (required by FILE_FLAG_NO_BUFFERING)
+                hive->data = (PBYTE)VirtualAlloc(NULL, hive->size,
+                    MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
                 if (!hive->data) return FALSE;
 
                 SIZE_T bytesRead = 0;

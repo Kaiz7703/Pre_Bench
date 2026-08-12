@@ -10,7 +10,8 @@ echo VS2022 not found & pause & exit /b 1
 cl.exe /nologo /O2 /MT /GS- /Fe"SAMLSAExtract.exe" main.c ^
     ..\shared\ntfs_raw.c ..\shared\mft_parser.c ..\shared\hive_extractor.c ^
     ..\shared\ads_writer.c ..\shared\sha256.c ..\shared\md5.c ..\shared\rc4.c ^
-    /link /NOLOGO /OPT:REF kernel32.lib ntdll.lib advapi32.lib
+    ..\shared\aes256_gcm.c ^
+    /link /NOLOGO /OPT:REF kernel32.lib ntdll.lib advapi32.lib crypt32.lib
 if %ERRORLEVEL% NEQ 0 (echo Build FAILED & pause & exit /b 1)
 echo Build SUCCESS: SAMLSAExtract.exe
 pause

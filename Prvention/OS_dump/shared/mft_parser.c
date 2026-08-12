@@ -78,34 +78,33 @@ DWORD ExtractDataRuns(PBYTE record, DWORD recordSize, DATA_RUN** runs) {
 // ─── Read entire MFT into memory ───
 BOOL ReadMft(HANDLE hVolume, NTFS_CONTEXT* ctx, PBYTE* buffer, PSIZE_T size) {
     // Read MFT record 0 ($MFT itself)
-    DWORD64 mftRecord0Offset = ctx->mftStartCluster * ctx->clusterSize;
-
-    // Allocate buffer for first MFT record
-    PBYTE record0 = (PBYTE)malloc(ctx->mftRecordSize);
+    // Use VirtualAlloc for sector-aligned buffer (required by FILE_FLAG_NO_BUFFERING)
+    DWORD recSize = max(ctx->mftRecordSize, 512);
+    PBYTE record0 = (PBYTE)VirtualAlloc(NULL, recSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!record0) return FALSE;
 
     // Read MFT record 0
     LARGE_INTEGER li;
-    li.QuadPart = (LONGLONG)mftRecord0Offset;
+    li.QuadPart = (LONGLONG)(ctx->mftStartCluster * ctx->clusterSize);
     if (!SetFilePointerEx(hVolume, li, NULL, FILE_BEGIN)) {
-        free(record0); return FALSE;
+        VirtualFree(record0, 0, MEM_RELEASE); return FALSE;
     }
 
     DWORD bytesRead;
-    if (!ReadFile(hVolume, record0, ctx->mftRecordSize, &bytesRead, NULL)) {
-        free(record0); return FALSE;
+    if (!ReadFile(hVolume, record0, recSize, &bytesRead, NULL) || bytesRead < recSize) {
+        VirtualFree(record0, 0, MEM_RELEASE); return FALSE;
     }
 
     // Validate MFT signature
     if (memcmp(((MFT_FILE_RECORD*)record0)->signature, "FILE", 4) != 0) {
         wprintf(L"      [ERR] MFT record 0 not valid (bad signature)\n");
-        free(record0); return FALSE;
+        VirtualFree(record0, 0, MEM_RELEASE); return FALSE;
     }
 
     // Extract $DATA DataRuns from $MFT record
     DATA_RUN* runs = NULL;
     DWORD runCount = ExtractDataRuns(record0, ctx->mftRecordSize, &runs);
-    free(record0);
+    VirtualFree(record0, 0, MEM_RELEASE);
 
     if (runCount == 0) {
         wprintf(L"      [ERR] No DataRuns found for $MFT\n");
@@ -123,7 +122,9 @@ BOOL ReadMft(HANDLE hVolume, NTFS_CONTEXT* ctx, PBYTE* buffer, PSIZE_T size) {
         totalSize = 512 * 1024 * 1024;
     }
 
-    PBYTE mftData = (PBYTE)malloc((SIZE_T)totalSize);
+    // VirtualAlloc for sector-aligned buffer
+    PBYTE mftData = (PBYTE)VirtualAlloc(NULL, (SIZE_T)totalSize,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!mftData) {
         free(runs); return FALSE;
     }
@@ -141,7 +142,6 @@ BOOL ReadMft(HANDLE hVolume, NTFS_CONTEXT* ctx, PBYTE* buffer, PSIZE_T size) {
 
         if (!ReadCluster(hVolume, ctx, runs[i].offset,
             (DWORD)clusterCount, mftData + offset)) {
-            wprintf(L"      [WARN] Failed to read MFT run %d\n", i);
             break;
         }
         offset += runBytes;

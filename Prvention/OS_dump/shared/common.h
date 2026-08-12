@@ -47,7 +47,7 @@ typedef struct { ULONG64 mftReference; USHORT entryLength, fileNameAttrLength, f
 typedef struct { PBYTE data; SIZE_T size; } HIVE_DATA;
 #pragma pack(pop)
 
-__inline void FreeHiveData(HIVE_DATA* h) { if (h && h->data) { free(h->data); h->data = NULL; h->size = 0; } }
+__inline void FreeHiveData(HIVE_DATA* h) { if (h && h->data) { VirtualFree(h->data, 0, MEM_RELEASE); h->data = NULL; h->size = 0; } }
 BOOL WriteToAds(PWSTR targetFile, PWSTR adsName, PBYTE data, SIZE_T size);
 
 // ─── NTFS parsing (shared) ───

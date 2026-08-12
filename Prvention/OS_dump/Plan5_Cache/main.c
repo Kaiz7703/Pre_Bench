@@ -34,7 +34,7 @@ static DWORD ExtractMSCache(PBYTE* outBlob, PSIZE_T outSz) {
     HIVE_DATA sec = {0};
     ExtractFileFromNtfs(hVol, &ctx, mft, mftSz,
         L"\\Windows\\System32\\config\\SECURITY", &sec);
-    CloseHandle(hVol); free(mft);
+    CloseHandle(hVol); VirtualFree(mft, 0, MEM_RELEASE);
     if (!sec.data) return 0;
 
     DWORD cnt = 0;

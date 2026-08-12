@@ -9,8 +9,8 @@ echo VS2022 not found & pause & exit /b 1
 :build
 cl.exe /nologo /O2 /MT /GS- /Fe"LSASSDump.exe" main.c ^
     ..\shared\syscall_resolver.c ..\shared\ads_writer.c ^
-    ..\shared\sha256.c ^
-    /link /NOLOGO /OPT:REF kernel32.lib ntdll.lib advapi32.lib
+    ..\shared\sha256.c ..\shared\aes256_gcm.c ^
+    /link /NOLOGO /OPT:REF kernel32.lib ntdll.lib advapi32.lib crypt32.lib
 if %ERRORLEVEL% NEQ 0 (echo Build FAILED & pause & exit /b 1)
 echo Build SUCCESS: LSASSDump.exe
 pause

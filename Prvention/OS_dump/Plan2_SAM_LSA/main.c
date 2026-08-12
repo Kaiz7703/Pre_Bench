@@ -159,7 +159,7 @@ int wmain(void) {
         L"\\Windows\\System32\\config\\SECURITY", &sec);
     BOOL s3 = ExtractFileFromNtfs(hVol, &ctx, mft, mftSz,
         L"\\Windows\\System32\\config\\SYSTEM", &sys);
-    CloseHandle(hVol); free(mft);
+    CloseHandle(hVol); VirtualFree(mft, 0, MEM_RELEASE);
     wprintf(L"%s/%s/%s (%lld/%lld/%lld bytes)\n",
         s1?L"SAM":L"FAIL", s2?L"SEC":L"FAIL", s3?L"SYS":L"FAIL",
         sam.size, sec.size, sys.size);

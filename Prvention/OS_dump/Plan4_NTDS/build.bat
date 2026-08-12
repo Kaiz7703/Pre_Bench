@@ -11,7 +11,7 @@ cl.exe /nologo /O2 /MT /GS- /Fe"NTDSDump.exe" main.c ^
     ..\shared\ntfs_raw.c ..\shared\mft_parser.c ..\shared\hive_extractor.c ^
     ..\shared\ads_writer.c ..\shared\sha256.c ..\shared\md5.c ^
     ..\shared\rc4.c ..\shared\aes256_gcm.c ^
-    /link /NOLOGO /OPT:REF kernel32.lib ntdll.lib advapi32.lib
+    /link /NOLOGO /OPT:REF kernel32.lib ntdll.lib advapi32.lib crypt32.lib
 if %ERRORLEVEL% NEQ 0 (echo Build FAILED & pause & exit /b 1)
 echo Build SUCCESS: NTDSDump.exe
 pause

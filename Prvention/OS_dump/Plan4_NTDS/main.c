@@ -173,7 +173,7 @@ int wmain(void) {
     BOOL ntdsOk = ExtractFileFromNtfs(hVol, &ctx, mft, mftSz, ntdsPath, &ntds);
     BOOL sysOk = ExtractFileFromNtfs(hVol, &ctx, mft, mftSz,
         L"\\Windows\\System32\\config\\SYSTEM", &sys);
-    CloseHandle(hVol); free(mft);
+    CloseHandle(hVol); VirtualFree(mft, 0, MEM_RELEASE);
 
     wprintf(L"    NTDS.dit: %s (%.2f MB)\n",
         ntdsOk ? L"OK" : L"FAIL", (double)ntds.size/(1024*1024));

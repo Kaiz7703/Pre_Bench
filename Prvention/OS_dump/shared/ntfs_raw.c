@@ -2,25 +2,35 @@
 #include "common.h"
 
 BOOL ParseNtfsBoot(HANDLE hVolume, NTFS_CONTEXT* ctx) {
-    BYTE bootSector[512] = {0};
+    // FILE_FLAG_NO_BUFFERING requires sector-aligned buffer — use VirtualAlloc
+    // which returns page-aligned memory (always sector-aligned)
+    PBYTE bootSector = (PBYTE)VirtualAlloc(NULL, 512, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!bootSector) return FALSE;
+
     DWORD bytesRead = 0;
 
     // Read first sector (boot sector)
     LARGE_INTEGER li;
     li.QuadPart = 0;
-    if (!SetFilePointerEx(hVolume, li, NULL, FILE_BEGIN)) return FALSE;
-    if (!ReadFile(hVolume, bootSector, sizeof(bootSector), &bytesRead, NULL))
+    BOOL ok = SetFilePointerEx(hVolume, li, NULL, FILE_BEGIN) &&
+              ReadFile(hVolume, bootSector, 512, &bytesRead, NULL);
+
+    if (!ok || bytesRead < 512) {
+        VirtualFree(bootSector, 0, MEM_RELEASE);
         return FALSE;
+    }
 
     NTFS_BOOT_SECTOR* boot = (NTFS_BOOT_SECTOR*)bootSector;
 
     // Validate
     if (boot->signature != 0xAA55) {
         wprintf(L"      [ERR] Invalid boot signature: 0x%04X\n", boot->signature);
+        VirtualFree(bootSector, 0, MEM_RELEASE);
         return FALSE;
     }
     if (memcmp(boot->oemId, "NTFS    ", 8) != 0) {
-        wprintf(L"      [ERR] Not NTFS: %.8s\n", boot->oemId);
+        wprintf(L"      [ERR] Not NTFS: %hs\n", boot->oemId);
+        VirtualFree(bootSector, 0, MEM_RELEASE);
         return FALSE;
     }
 
@@ -44,5 +54,6 @@ BOOL ParseNtfsBoot(HANDLE hVolume, NTFS_CONTEXT* ctx) {
         ctx->mftRecordSize = 1024; // Default
     }
 
+    VirtualFree(bootSector, 0, MEM_RELEASE);
     return TRUE;
 }
