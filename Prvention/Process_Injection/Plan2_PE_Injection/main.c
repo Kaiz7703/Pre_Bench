@@ -249,7 +249,7 @@ int wmain(void) {
     wprintf(L"[*] PE Injection — Process Doppelgänging via NTFS Transaction (T1055.002)\n\n");
 
     // ── Step 1: Resolve indirect syscalls ──
-    wprintf(L"[1] Resolving syscalls from disk ntdll.dll... ");
+    wprintf(L"[1] Resolving syscalls (loaded ntdll.dll)... ");
     if (!InitSyscallResolver()) {
         wprintf(L"FAILED (error: %d)\n", GetLastError());
         return 1;
