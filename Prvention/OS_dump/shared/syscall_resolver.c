@@ -70,46 +70,62 @@ static void FinalizeStubs(void) {
     }
 }
 
-// Read clean ntdll.dll from disk, walk export table, extract syscall numbers
+// ─── Extract SSN from a loaded ntdll syscall stub ───
+// Standard stub (Win10/11 x64):
+//   4C 8B D1        mov r10, rcx
+//   B8 <imm32>      mov eax, <SSN>
+//   0F 05           syscall
+//   C3              ret
+static BOOL ExtractSsnFromStub(PBYTE stub, DWORD* pSsn) {
+    if (!stub || !pSsn) return FALSE;
+    // Pattern 1: mov r10, rcx ; mov eax, imm32
+    if (stub[0] == 0x4C && stub[1] == 0x8B && stub[2] == 0xD1 && stub[3] == 0xB8) {
+        *pSsn = *(PDWORD)(stub + 4);
+        return TRUE;
+    }
+    // Pattern 2: mov eax, imm32 at offset 0
+    if (stub[0] == 0xB8) {
+        *pSsn = *(PDWORD)(stub + 1);
+        return TRUE;
+    }
+    // Pattern 3: scan first 16 bytes for mov eax (0xB8)
+    for (int i = 0; i < 16; i++) {
+        if (stub[i] == 0xB8) {
+            *pSsn = *(PDWORD)(stub + i + 1);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+// Resolve SSNs from the LOADED ntdll.dll (not disk) so the numbers always
+// match what the kernel expects for this boot — survives syscall number
+// randomization and any file-system interception on ntdll.dll.
 BOOL InitSyscallResolver(void) {
     // Pre-allocate one shared page for all stubs (avoids N×RW→RX EDR triggers)
     g_StubPage = (PBYTE)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!g_StubPage) return FALSE;
     g_StubOffset = 0;
 
-    WCHAR sysDir[MAX_PATH];
-    if (!GetSystemDirectoryW(sysDir, MAX_PATH)) return FALSE;
-
-    WCHAR ntdllPath[MAX_PATH];
-    swprintf(ntdllPath, MAX_PATH, L"%s\\ntdll.dll", sysDir);
-
-    // Open and map ntdll.dll from disk
-    HANDLE hFile = CreateFileW(ntdllPath, GENERIC_READ, FILE_SHARE_READ,
-        NULL, OPEN_EXISTING, 0, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return FALSE;
-
-    HANDLE hMapping = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
-    if (!hMapping) { CloseHandle(hFile); return FALSE; }
-
-    PBYTE base = (PBYTE)MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
-    if (!base) { CloseHandle(hMapping); CloseHandle(hFile); return FALSE; }
-
-    // Walk PE export table
-    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)base;
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
-        UnmapViewOfFile(base); CloseHandle(hMapping); CloseHandle(hFile);
+    PBYTE base = (PBYTE)GetModuleHandleW(L"ntdll.dll");
+    if (!base) {
+        fprintf(stderr, "[!] resolver: GetModuleHandle(ntdll.dll) failed\n");
+        fflush(stderr);
         return FALSE;
     }
 
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)base;
     PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) {
-        UnmapViewOfFile(base); CloseHandle(hMapping); CloseHandle(hFile);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || nt->Signature != IMAGE_NT_SIGNATURE) {
+        fprintf(stderr, "[!] resolver: invalid PE headers\n");
+        fflush(stderr);
         return FALSE;
     }
 
     DWORD exportRVA = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
     if (exportRVA == 0) {
-        UnmapViewOfFile(base); CloseHandle(hMapping); CloseHandle(hFile);
+        fprintf(stderr, "[!] resolver: no export directory\n");
+        fflush(stderr);
         return FALSE;
     }
 
@@ -120,9 +136,7 @@ BOOL InitSyscallResolver(void) {
 
     DWORD resolvedCount = 0;
     for (int i = 0; g_Syscalls[i].name != NULL; i++) {
-        DWORD targetHash = NameHash((PCHAR)g_Syscalls[i].name);
-        // Can't do real string compare — use hash precomputation
-        // For now, search by iterating export names
+        BOOL found = FALSE;
         for (DWORD j = 0; j < exports->NumberOfNames; j++) {
             PCHAR exportName = (PCHAR)(base + names[j]);
 
@@ -136,32 +150,37 @@ BOOL InitSyscallResolver(void) {
             wName[k] = L'\0';
 
             if (wcscmp(wName, g_Syscalls[i].name) == 0) {
+                found = TRUE;
                 PBYTE stub = base + functions[ordinals[j]];
-
-                // Syscall number is at offset 4 of the stub
-                // ntdll stubs are: mov r10, rcx + mov eax, 0xNN + (syscall or jmp)
-                g_Syscalls[i].syscallNumber = *(PDWORD)(stub + 4);
-
-                // Validate: should be < 0x1000
-                if (g_Syscalls[i].syscallNumber < 0x1000) {
-                    g_Syscalls[i].stubAddress = CreateSyscallStub(
-                        g_Syscalls[i].syscallNumber);
+                DWORD ssn = 0;
+                if (ExtractSsnFromStub(stub, &ssn) && ssn < 0x1000) {
+                    g_Syscalls[i].syscallNumber = ssn;
+                    g_Syscalls[i].stubAddress = CreateSyscallStub(ssn);
                     if (g_Syscalls[i].stubAddress) {
                         resolvedCount++;
                     }
+                } else {
+                    fprintf(stderr, "[!] resolver: %S — bad stub pattern "
+                        "(%02X %02X %02X %02X %02X %02X %02X %02X), ssn=0x%08X\n",
+                        g_Syscalls[i].name, stub[0], stub[1], stub[2], stub[3],
+                        stub[4], stub[5], stub[6], stub[7], ssn);
+                    fflush(stderr);
                 }
                 break;
             }
         }
+        if (!found) {
+            fprintf(stderr, "[!] resolver: %S not found in exports\n", g_Syscalls[i].name);
+            fflush(stderr);
+        }
     }
-
-    UnmapViewOfFile(base);
-    CloseHandle(hMapping);
-    CloseHandle(hFile);
 
     // Finalize: change shared page from RW to RX in ONE call (not N calls)
     FinalizeStubs();
 
+    fprintf(stderr, "[*] resolver: %u/%u syscalls resolved\n",
+        resolvedCount, (DWORD)(_countof(g_Syscalls) - 1));
+    fflush(stderr);
     return resolvedCount > 0;
 }
 

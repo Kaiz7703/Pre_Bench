@@ -3,8 +3,9 @@
 
 BOOL ParseNtfsBoot(HANDLE hVolume, NTFS_CONTEXT* ctx) {
     // FILE_FLAG_NO_BUFFERING requires sector-aligned buffer — use VirtualAlloc
-    // which returns page-aligned memory (always sector-aligned)
-    PBYTE bootSector = (PBYTE)VirtualAlloc(NULL, 512, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    // which returns page-aligned memory (always sector-aligned).
+    // Read 4KB so both 512e and 4Kn-sector volumes work.
+    PBYTE bootSector = (PBYTE)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!bootSector) return FALSE;
 
     DWORD bytesRead = 0;
@@ -13,9 +14,11 @@ BOOL ParseNtfsBoot(HANDLE hVolume, NTFS_CONTEXT* ctx) {
     LARGE_INTEGER li;
     li.QuadPart = 0;
     BOOL ok = SetFilePointerEx(hVolume, li, NULL, FILE_BEGIN) &&
-              ReadFile(hVolume, bootSector, 512, &bytesRead, NULL);
+              ReadFile(hVolume, bootSector, 4096, &bytesRead, NULL);
 
     if (!ok || bytesRead < 512) {
+        wprintf(L"      [ERR] Boot sector read failed (err=%d, read=%d bytes)\n",
+            ok ? 0 : GetLastError(), bytesRead);
         VirtualFree(bootSector, 0, MEM_RELEASE);
         return FALSE;
     }
@@ -25,11 +28,18 @@ BOOL ParseNtfsBoot(HANDLE hVolume, NTFS_CONTEXT* ctx) {
     // Validate
     if (boot->signature != 0xAA55) {
         wprintf(L"      [ERR] Invalid boot signature: 0x%04X\n", boot->signature);
+        // Dump first 16 bytes to identify the actual filesystem (ReFS/BitLocker/...)
+        wprintf(L"      [i]  First bytes: ");
+        for (int i = 0; i < 16; i++) wprintf(L"%02X ", bootSector[i]);
+        wprintf(L"\n");
         VirtualFree(bootSector, 0, MEM_RELEASE);
         return FALSE;
     }
     if (memcmp(boot->oemId, "NTFS    ", 8) != 0) {
         wprintf(L"      [ERR] Not NTFS: %hs\n", boot->oemId);
+        if (memcmp(boot->oemId, "ReFS", 4) == 0) {
+            wprintf(L"      [i]  ReFS volume detected — raw NTFS parsing is not supported\n");
+        }
         VirtualFree(bootSector, 0, MEM_RELEASE);
         return FALSE;
     }

