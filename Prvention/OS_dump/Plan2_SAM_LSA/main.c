@@ -168,7 +168,9 @@ static BOOL ReadHiveFile(PWSTR path, HIVE_DATA* h) {
 }
 
 static BOOL FallbackSaveHives(HIVE_DATA* sam, HIVE_DATA* sec, HIVE_DATA* sys) {
-    if (!EnablePrivilege(SE_BACKUP_NAME) || !EnablePrivilege(SE_RESTORE_NAME)) {
+    // NOTE: explicit wide literals — SE_BACKUP_NAME is narrow unless UNICODE is
+    // defined, and these builds don't define it (caused err 1313 NO_SUCH_PRIVILEGE)
+    if (!EnablePrivilege(L"SeBackupPrivilege") || !EnablePrivilege(L"SeRestorePrivilege")) {
         wprintf(L"      [ERR] Failed to enable backup privileges (err=%d)\n", GetLastError());
         return FALSE;
     }

@@ -78,8 +78,10 @@ static DWORD ExtractMSCache(PBYTE* outBlob, PSIZE_T outSz) {
     if (!sec.data) {
         // Raw NTFS failed (ReFS etc.) — fallback: save SECURITY hive via RegSaveKey
         wprintf(L"      [i] Raw NTFS failed — RegSaveKey fallback...\n");
-        EnablePrivilege(SE_BACKUP_NAME);
-        EnablePrivilege(SE_RESTORE_NAME);
+        // NOTE: explicit wide literals — SE_BACKUP_NAME is narrow unless UNICODE
+        // is defined, and these builds don't define it (caused err 1313)
+        EnablePrivilege(L"SeBackupPrivilege");
+        EnablePrivilege(L"SeRestorePrivilege");
 
         WCHAR tmpDir[MAX_PATH], path[MAX_PATH];
         if (GetTempPathW(MAX_PATH, tmpDir)) {
