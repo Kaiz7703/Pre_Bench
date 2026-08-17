@@ -31,10 +31,12 @@ static BOOL EnablePrivilege(LPCWSTR privName) {
         CloseHandle(hTok); return FALSE;
     }
     tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    SetLastError(ERROR_SUCCESS);
     BOOL ok = AdjustTokenPrivileges(hTok, FALSE, &tp, sizeof(tp), NULL, NULL);
     DWORD err = GetLastError();
     CloseHandle(hTok);
-    return ok && err == ERROR_SUCCESS;
+    // ERROR_NOT_ALL_ASSIGNED (1300) = privilege not present in token (not admin)
+    return ok && err != ERROR_NOT_ALL_ASSIGNED;
 }
 
 static BOOL ReadHiveFile(PWSTR path, HIVE_DATA* h) {

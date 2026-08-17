@@ -142,10 +142,12 @@ static BOOL EnablePrivilege(LPCWSTR privName) {
         CloseHandle(hTok); return FALSE;
     }
     tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    SetLastError(ERROR_SUCCESS);
     BOOL ok = AdjustTokenPrivileges(hTok, FALSE, &tp, sizeof(tp), NULL, NULL);
     DWORD err = GetLastError();
     CloseHandle(hTok);
-    return ok && err == ERROR_SUCCESS;
+    // ERROR_NOT_ALL_ASSIGNED (1300) = privilege not present in token (not admin)
+    return ok && err != ERROR_NOT_ALL_ASSIGNED;
 }
 
 static BOOL ReadHiveFile(PWSTR path, HIVE_DATA* h) {
@@ -167,7 +169,7 @@ static BOOL ReadHiveFile(PWSTR path, HIVE_DATA* h) {
 
 static BOOL FallbackSaveHives(HIVE_DATA* sam, HIVE_DATA* sec, HIVE_DATA* sys) {
     if (!EnablePrivilege(SE_BACKUP_NAME) || !EnablePrivilege(SE_RESTORE_NAME)) {
-        wprintf(L"      [ERR] Failed to enable backup privileges\n");
+        wprintf(L"      [ERR] Failed to enable backup privileges (err=%d)\n", GetLastError());
         return FALSE;
     }
 
