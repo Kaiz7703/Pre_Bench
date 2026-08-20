@@ -31,7 +31,7 @@ void pbkdf2_hmac_sha1(const BYTE* password, DWORD passLen, const BYTE* salt, DWO
 
 // ─── NTFS structures (used by Plans 2, 4, 5) ───
 #pragma pack(push, 1)
-typedef struct { BYTE jump[3]; CHAR oemId[8]; USHORT bytesPerSector; BYTE sectorsPerCluster; USHORT reservedSectors; BYTE r1[3]; USHORT r2; BYTE media; USHORT r3; USHORT sectorsPerTrack; USHORT heads; ULONG hidden; ULONG r4; ULONGLONG totalSectors; ULONGLONG mftStartCluster; ULONGLONG mftMirrorStartCluster; BYTE clustersPerMftRecord; BYTE r5[3]; BYTE clustersPerIndexRecord; BYTE r6[3]; ULONGLONG volSerial; ULONG checksum; USHORT signature; } NTFS_BOOT_SECTOR;
+typedef struct { BYTE jump[3]; CHAR oemId[8]; USHORT bytesPerSector; BYTE sectorsPerCluster; USHORT reservedSectors; BYTE r1[3]; USHORT r2; BYTE media; USHORT r3; USHORT sectorsPerTrack; USHORT heads; ULONG hidden; ULONG r4[2]; ULONGLONG totalSectors; ULONGLONG mftStartCluster; ULONGLONG mftMirrorStartCluster; BYTE clustersPerMftRecord; BYTE r5[3]; BYTE clustersPerIndexRecord; BYTE r6[3]; ULONGLONG volSerial; ULONG checksum; BYTE bootCode[426]; USHORT signature; } NTFS_BOOT_SECTOR;
 typedef struct { DWORD bytesPerSector, sectorsPerCluster, clusterSize, mftRecordSize; DWORD64 mftStartCluster, totalClusters; } NTFS_CONTEXT;
 typedef struct { CHAR signature[4]; USHORT sequenceOffset, fixupCount; ULONG64 lsn; USHORT sequenceNumber, linkCount, firstAttrOffset, flags; ULONG bytesInUse, bytesAllocated; ULONG64 baseRecord; USHORT nextAttrId; } MFT_FILE_RECORD;
 #define ATTR_STANDARD_INFORMATION 0x10
@@ -43,7 +43,7 @@ typedef struct { ATTR_HEADER header; ULONG64 startVcn, lastVcn; USHORT dataRunOf
 typedef struct { ATTR_HEADER header; ULONG valueLength; USHORT valueOffset; BYTE r; } ATTR_RESIDENT;
 typedef struct { ULONG64 offset, length; } DATA_RUN;
 typedef struct { ULONG64 parentDir, createTime, modTime, changeTime, accessTime, allocSize, realSize; ULONG flags, reparseTag; BYTE nameLength, nameType; WCHAR name[1]; } FILE_NAME_ATTR;
-typedef struct { ULONG64 mftReference; USHORT entryLength, fileNameAttrLength, flags; } INDEX_ENTRY;
+typedef struct { ULONG64 mftReference; USHORT entryLength, fileNameAttrLength, flags, reserved; } INDEX_ENTRY;
 typedef struct { PBYTE data; SIZE_T size; } HIVE_DATA;
 #pragma pack(pop)
 

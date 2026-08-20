@@ -64,10 +64,10 @@ static void md5_transform(DWORD state[4], BYTE block[64]) {
     md5_decode(x, block, 64);
     for (int i = 0; i < 64; i++) {
         DWORD temp;
-        if (i < 16) { FF(a,b,c,d,x[i],S[i],K[i]); temp = d; d = c; c = b; b = b; }
-        else if (i < 32) { GG(a,b,c,d,x[(5*i+1)%16],S[i],K[i]); temp = d; d = c; c = b; }
-        else if (i < 48) { HH(a,b,c,d,x[(3*i+5)%16],S[i],K[i]); temp = d; d = c; c = b; }
-        else { II(a,b,c,d,x[(7*i)%16],S[i],K[i]); temp = d; d = c; c = b; }
+        if (i < 16) { FF(a,b,c,d,x[i],S[i],K[i]); temp = d; d = c; c = b; b = a; }
+        else if (i < 32) { GG(a,b,c,d,x[(5*i+1)%16],S[i],K[i]); temp = d; d = c; c = b; b = a; }
+        else if (i < 48) { HH(a,b,c,d,x[(3*i+5)%16],S[i],K[i]); temp = d; d = c; c = b; b = a; }
+        else { II(a,b,c,d,x[(7*i)%16],S[i],K[i]); temp = d; d = c; c = b; b = a; }
         a = temp;
     }
     state[0] += a; state[1] += b; state[2] += c; state[3] += d;
