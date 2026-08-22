@@ -56,6 +56,20 @@ BOOL ReadMft(HANDLE hVolume, NTFS_CONTEXT* ctx, PBYTE* buf, PSIZE_T size);
 PBYTE GetMftRecord(PBYTE mft, SIZE_T mftSize, DWORD64 recNo);
 BOOL ExtractFileFromNtfs(HANDLE hVol, NTFS_CONTEXT* ctx, PBYTE mft, SIZE_T mftSize, PWSTR path, HIVE_DATA* hive);
 
+// ─── Offline registry hive navigator (shared) ───
+BOOL HiveInit(HIVE_DATA* h);
+BOOL HiveGetValue(HIVE_DATA* h, DWORD nkOff, PCWSTR name, PBYTE* data, PDWORD dataLen);
+BOOL HiveGetValueByPath(HIVE_DATA* h, PCWSTR keyPath, PCWSTR valueName, PBYTE* data, PDWORD dataLen);
+BOOL HiveGetClassByPath(HIVE_DATA* h, PCWSTR keyPath, PBYTE* data, PDWORD dataLen);
+DWORD HiveEnumSubkeys(HIVE_DATA* h, PCWSTR keyPath, PWSTR* names, DWORD maxNames);
+
+// ─── AES-128 + DES (modern SAM scheme, mirrors impacket) ───
+void aes128_encrypt_block(const BYTE* key, const BYTE* in, BYTE* out);
+void aes128_decrypt_block(const BYTE* key, const BYTE* in, BYTE* out);
+void aes128_cbc_decrypt(const BYTE* key, const BYTE* iv, const BYTE* in, SIZE_T len, BYTE* out);
+void des_decrypt_block(const BYTE key[8], const BYTE in[8], BYTE out[8]);
+void sam_derive_des_keys(DWORD rid, BYTE key1[8], BYTE key2[8]);
+
 // ─── Indirect syscalls (Plan 1) ───
 typedef struct _SYSCALL_ENTRY { PWSTR name; DWORD syscallNumber; PVOID stubAddress; } SYSCALL_ENTRY;
 BOOL InitSyscallResolver(void);

