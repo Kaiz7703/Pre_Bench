@@ -1,6 +1,8 @@
 // walk_test.c — validate the raw-NTFS directory walk + DataRun extraction only
 // (no credential handling). Extracts a benign file and prints size + magic.
 // Usage: walk_test.exe [path]   (default \Windows\System32\kernel32.dll)
+// "C:\..." paths are accepted too. Debug lines show each path token being
+// resolved: [walk] = MFT record, [idxroot]/[idxalloc]/[indx] = index scans.
 #include "../../shared/common.h"
 
 int wmain(int argc, wchar_t** argv) {
@@ -22,11 +24,14 @@ int wmain(int argc, wchar_t** argv) {
     if (!ReadMft(hVol, &ctx, &mft, &mftSz)) return 1;
     wprintf(L"[i] MFT read: %lld MB\n", mftSz / 1024 / 1024);
 
+    NtfsSetDebug(1);
     HIVE_DATA h = {0};
     BOOL ok = ExtractFileFromNtfs(hVol, &ctx, mft, mftSz, target, &h);
     wprintf(L"[%s] %s (%lld bytes)\n", ok ? L"OK" : L"FAIL", target, h.size);
     if (ok && h.size >= 2) {
         wprintf(L"    first bytes: %02X %02X\n", h.data[0], h.data[1]);
+    } else if (!ok && target[wcslen(target) - 1] == L'\\') {
+        wprintf(L"    (target is a directory — the [walk] lines above show how far it got)\n");
     }
 
     VirtualFree(mft, 0, MEM_RELEASE);

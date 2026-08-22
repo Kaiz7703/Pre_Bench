@@ -55,6 +55,7 @@ BOOL ParseNtfsBoot(HANDLE hVolume, NTFS_CONTEXT* ctx);
 BOOL ReadMft(HANDLE hVolume, NTFS_CONTEXT* ctx, PBYTE* buf, PSIZE_T size);
 PBYTE GetMftRecord(PBYTE mft, SIZE_T mftSize, DWORD64 recNo);
 BOOL ExtractFileFromNtfs(HANDLE hVol, NTFS_CONTEXT* ctx, PBYTE mft, SIZE_T mftSize, PWSTR path, HIVE_DATA* hive);
+void NtfsSetDebug(int on);
 
 // ─── Offline registry hive navigator (shared) ───
 BOOL HiveInit(HIVE_DATA* h);

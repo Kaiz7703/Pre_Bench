@@ -3,6 +3,9 @@
 // to find and extract target files
 #include "common.h"
 
+static int g_dbg = 0;
+void NtfsSetDebug(int on) { g_dbg = on; }
+
 // ─── Read clusters from volume ───
 static BOOL ReadClusters(HANDLE hVolume, NTFS_CONTEXT* ctx,
     DWORD64 startCluster, DWORD count, PBYTE buffer) {
@@ -15,6 +18,21 @@ static BOOL ReadClusters(HANDLE hVolume, NTFS_CONTEXT* ctx,
     return ReadFile(hVolume, buffer, toRead, &bytesRead, NULL) && bytesRead == toRead;
 }
 
+// ─── Apply USA fixups (MFT records and INDX records) ───
+// On disk the last 2 bytes of every sector hold the update-sequence number;
+// the true bytes are in the fixup array at usaOff. Without this, any field
+// straddling a sector boundary decodes as garbage.
+static void ApplyUsaFixups(PBYTE rec, DWORD recSize, USHORT usaOff,
+    USHORT usaCnt, DWORD sectorSize) {
+    if (usaCnt < 1 || usaCnt > 32 || sectorSize < 512) return;
+    if (usaOff + (DWORD)usaCnt * 2 > recSize) return;
+    PBYTE arr = rec + usaOff;
+    for (USHORT i = 1; i < usaCnt; i++) {
+        DWORD pos = i * sectorSize - 2;
+        if (pos + 2 <= recSize) memcpy(rec + pos, arr + i * 2, 2);
+    }
+}
+
 // ─── Scan a run of INDEX_ENTRY structures for a child name ───
 // Works for both $INDEX_ROOT (entries after the 16-byte header) and INDX
 // records (entries after the 0x18-byte record header; the first entry in an
@@ -22,9 +40,26 @@ static BOOL ReadClusters(HANDLE hVolume, NTFS_CONTEXT* ctx,
 static BOOL ScanIndexEntries(PBYTE entries, DWORD bytes,
     PWSTR childName, DWORD64* childRecord) {
     PBYTE p = entries, end = entries + bytes;
+    int dbgCount = 0;
     while (p + sizeof(INDEX_ENTRY) <= end) {
         INDEX_ENTRY* e = (INDEX_ENTRY*)p;
         if (e->entryLength < sizeof(INDEX_ENTRY)) break;
+
+        if (g_dbg && dbgCount++ < 32) {
+            wprintf(L"      [entry] len=%u keylen=%u flags=0x%02X",
+                e->entryLength, e->fileNameAttrLength, e->flags);
+            if (!(e->flags & 0x02) && e->fileNameAttrLength >= 66) {
+                FILE_NAME_ATTR* fn = (FILE_NAME_ATTR*)(p + sizeof(INDEX_ENTRY));
+                if (fn->nameLength > 0 && fn->nameLength <= 255) {
+                    WCHAR dbgName[48];
+                    DWORD n = min((DWORD)fn->nameLength, 47);
+                    memcpy(dbgName, fn->name, n * sizeof(WCHAR));
+                    dbgName[n] = 0;
+                    wprintf(L" name=%ls", dbgName);
+                }
+            }
+            wprintf(L"\n");
+        }
 
         if (!(e->flags & 0x02) && e->fileNameAttrLength >= 66) {
             FILE_NAME_ATTR* fn = (FILE_NAME_ATTR*)(p + sizeof(INDEX_ENTRY));
@@ -46,18 +81,6 @@ static BOOL ScanIndexEntries(PBYTE entries, DWORD bytes,
     return FALSE;
 }
 
-// ─── Apply update-sequence fixups to an INDX record ───
-static void ApplyIndxFixups(PBYTE record, USHORT fixupOffset,
-    USHORT fixupCount, DWORD sectorSize) {
-    PBYTE arr = record + fixupOffset;
-    for (USHORT i = 1; i < fixupCount; i++) {
-        DWORD pos = i * sectorSize - 2;
-        if (pos + 2 <= fixupOffset + (DWORD)fixupCount * 2) {
-            memcpy(record + pos, arr + i * 2, 2);
-        }
-    }
-}
-
 // ─── Scan $INDEX_ALLOCATION (non-resident) INDX records for a child name ───
 static BOOL ScanIndexAllocation(HANDLE hVolume, NTFS_CONTEXT* ntfs,
     PBYTE dirRec, PWSTR childName, DWORD64* childRecord, DWORD blockSize) {
@@ -70,7 +93,12 @@ static BOOL ScanIndexAllocation(HANDLE hVolume, NTFS_CONTEXT* ntfs,
             DWORD64 totalSize = nonRes->realSize;
             if (totalSize == 0 || totalSize > 512 * 1024 * 1024) { attrPtr += hdr->length; continue; }
 
-            PBYTE buf = (PBYTE)VirtualAlloc(NULL, (SIZE_T)totalSize,
+            DWORD recSize = blockSize ? blockSize : 4096;
+            if (recSize < 512 || recSize > 65536) recSize = 4096;
+            if (g_dbg) wprintf(L"    [idxalloc] realSize=%llu blockSize=%u\n", totalSize, recSize);
+
+            // +recSize slack: the last run may be rounded up to whole clusters
+            PBYTE buf = (PBYTE)VirtualAlloc(NULL, (SIZE_T)(totalSize + recSize),
                 MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
             if (!buf) { attrPtr += hdr->length; continue; }
 
@@ -90,10 +118,9 @@ static BOOL ScanIndexAllocation(HANDLE hVolume, NTFS_CONTEXT* ntfs,
                 LONGLONG runOffset = 0;
                 for (int i = 0; i < offSize; i++)
                     runOffset |= ((ULONG64)(*drPtr++)) << (i * 8);
-                if (offSize > 0 && (runOffset & (1LL << ((offSize * 8) - 1)))) {
-                    LONGLONG signMask = 0;
-                    for (int i = offSize * 8; i < 64; i++) signMask |= (1LL << i);
-                    runOffset |= signMask;
+                if (offSize > 0 && offSize < 8 &&
+                    (runOffset & (1LL << (offSize * 8 - 1)))) {
+                    runOffset |= ~((1LL << (offSize * 8)) - 1);
                 }
 
                 currentCluster += runOffset;
@@ -101,29 +128,34 @@ static BOOL ScanIndexAllocation(HANDLE hVolume, NTFS_CONTEXT* ntfs,
                 if (offset + runBytes > totalSize) runBytes = totalSize - offset;
 
                 if (runBytes > 0 && currentCluster > 0) {
-                    ReadClusters(hVolume, ntfs, currentCluster,
-                        (DWORD)((runBytes + ntfs->clusterSize - 1) / ntfs->clusterSize),
-                        buf + offset);
+                    DWORD cl = (DWORD)((runBytes + ntfs->clusterSize - 1) / ntfs->clusterSize);
+                    if (g_dbg) wprintf(L"    [idxalloc] run: lcn=%llu clusters=%u\n", currentCluster, cl);
+                    ReadClusters(hVolume, ntfs, currentCluster, cl, buf + offset);
                 }
                 offset += runBytes;
             }
 
             // Walk INDX records (each starts with "INDX" signature)
-            DWORD recSize = blockSize ? blockSize : 4096;
             for (DWORD64 off = 0; off + 0x40 <= totalSize; off += recSize) {
                 PBYTE indx = buf + off;
-                if (memcmp(indx, "INDX", 4) != 0) continue;
+                if (memcmp(indx, "INDX", 4) != 0) {
+                    if (g_dbg) wprintf(L"    [indx @%llu] bad sig %02X %02X %02X %02X\n",
+                        off, indx[0], indx[1], indx[2], indx[3]);
+                    continue;
+                }
                 USHORT fixupOff = *(PUSHORT)(indx + 4);
                 USHORT fixupCnt = *(PUSHORT)(indx + 6);
                 if (fixupCnt < 1 || fixupCnt > 32 ||
                     fixupOff + (DWORD)fixupCnt * 2 > recSize) continue;
 
-                ApplyIndxFixups(indx, fixupOff, fixupCnt, ntfs->bytesPerSector);
+                ApplyUsaFixups(indx, recSize, fixupOff, fixupCnt, ntfs->bytesPerSector);
 
                 // Index node header @0x18: entries offset (relative to 0x18),
                 // total entry bytes @0x1C. Typical: entries at 0x18+0x28 = 0x40.
                 DWORD entriesOff = *(PDWORD)(indx + 0x18);
                 DWORD entriesBytes = *(PDWORD)(indx + 0x1C);
+                if (g_dbg) wprintf(L"    [indx @%llu] fixup=%u/%u entriesOff=0x%X entriesBytes=%u\n",
+                    off, fixupOff, fixupCnt, entriesOff, entriesBytes);
                 if (entriesOff < 0x10 ||
                     0x18 + entriesOff + entriesBytes > recSize) continue;
 
@@ -149,12 +181,24 @@ BOOL FindChildInDir(HANDLE hVolume, NTFS_CONTEXT* ntfs,
     if (recSize < 256 || recSize > 4096) recSize = 1024;
     if ((SIZE_T)dirRecordNum * recSize + recSize > mftSize) return FALSE;
 
-    PBYTE dirRec = mftBuffer + dirRecordNum * recSize;
-    if (memcmp(((MFT_FILE_RECORD*)dirRec)->signature, "FILE", 4) != 0)
-        return FALSE;
+    // Work on a local copy so USA fixups don't corrupt the shared MFT buffer
+    BYTE localRec[4096];
+    memcpy(localRec, mftBuffer + dirRecordNum * recSize, recSize);
+    PBYTE dirRec = localRec;
 
     MFT_FILE_RECORD* fileRec = (MFT_FILE_RECORD*)dirRec;
+    if (g_dbg) {
+        wprintf(L"    [walk] rec=%llu sig=%c%c%c%c flags=0x%04X usa=%u/%u firstAttr=0x%X\n",
+            dirRecordNum, dirRec[0], dirRec[1], dirRec[2], dirRec[3],
+            fileRec->flags, fileRec->sequenceOffset, fileRec->fixupCount,
+            fileRec->firstAttrOffset);
+    }
+    if (memcmp(fileRec->signature, "FILE", 4) != 0) return FALSE;
     if (!(fileRec->flags & 0x0002)) return FALSE; // Not a directory
+
+    // Restore true bytes at sector ends (update-sequence array)
+    ApplyUsaFixups(dirRec, recSize, fileRec->sequenceOffset,
+        fileRec->fixupCount, ntfs->bytesPerSector);
 
     DWORD indexBlockSize = 4096;
 
@@ -166,6 +210,7 @@ BOOL FindChildInDir(HANDLE hVolume, NTFS_CONTEXT* ntfs,
         if (attrHdr->type == ATTR_INDEX_ROOT && !attrHdr->nonResident) {
             ATTR_RESIDENT* resAttr = (ATTR_RESIDENT*)attrPtr;
             PBYTE indexRoot = (PBYTE)attrPtr + resAttr->valueOffset;
+            if (g_dbg) wprintf(L"    [idxroot] valueLen=%u\n", resAttr->valueLength);
             if (resAttr->valueLength >= 16 + sizeof(INDEX_ENTRY)) {
                 // index root header: type(4) + collation(4) + indexBlockSize(4) +
                 //                    clustersPerIndexRec(1) + reserved(3)
@@ -201,14 +246,16 @@ BOOL ExtractFileFromNtfs(HANDLE hVolume, NTFS_CONTEXT* ntfs,
     WCHAR* token = NULL;
     WCHAR* context = NULL;
 
-    // Skip leading backslash if present
-    if (pathCopy[0] == L'\\') {
-        token = wcstok_s(pathCopy + 1, L"\\", &context);
-    } else {
-        token = wcstok_s(pathCopy, L"\\", &context);
-    }
+    // Skip optional "X:" drive prefix and leading backslash
+    PWSTR start = pathCopy;
+    if (((start[0] >= L'a' && start[0] <= L'z') ||
+         (start[0] >= L'A' && start[0] <= L'Z')) && start[1] == L':')
+        start += 2;
+    if (start[0] == L'\\') start++;
+    token = wcstok_s(start, L"\\", &context);
 
     while (token != NULL) {
+        if (g_dbg) wprintf(L"  [walk] find \"%ls\" in rec %llu\n", token, currentRecord);
         if (!FindChildInDir(hVolume, ntfs, mftBuffer, mftSize,
             currentRecord, token, &childRecord)) {
             return FALSE;
@@ -271,10 +318,9 @@ BOOL ExtractFileFromNtfs(HANDLE hVolume, NTFS_CONTEXT* ntfs,
                     LONGLONG runOffset = 0;
                     for (int i = 0; i < offSize; i++)
                         runOffset |= ((ULONG64)(*drPtr++)) << (i * 8);
-                    if (offSize > 0 && (runOffset & (1LL << ((offSize * 8) - 1)))) {
-                        LONGLONG signMask = 0;
-                        for (int i = offSize * 8; i < 64; i++) signMask |= (1LL << i);
-                        runOffset |= signMask;
+                    if (offSize > 0 && offSize < 8 &&
+                        (runOffset & (1LL << (offSize * 8 - 1)))) {
+                        runOffset |= ~((1LL << (offSize * 8)) - 1);
                     }
 
                     currentCluster += runOffset;
