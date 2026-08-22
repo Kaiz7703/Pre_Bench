@@ -17,7 +17,9 @@
 
 # Test / debug / fix artifacts — not part of the demo deliverable
 Prvention/OS_dump/Plan1_LSASS/test/
-Prvention/OS_dump/Plan2_SAM_LSA/test/
+Prvention/OS_dump/Plan2_SAM_LSA/test/*
+!Prvention/OS_dump/Plan2_SAM_LSA/test/walk_test.c
+!Prvention/OS_dump/Plan2_SAM_LSA/test/walk_test.exe
 Prvention/OS_dump/Plan1_LSASS/elevate_setup.ps1
 Prvention/OS_dump/Plan1_LSASS/build_err.txt
 Prvention/OS_dump/Plan1_LSASS/build_log.txt
